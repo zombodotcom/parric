@@ -1,0 +1,279 @@
+<html>
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+		<link rel="stylesheet" href="./default.css" type="text/css" />
+	<title>EJCP 2015 Lab: Introduction to Loop Transformations</title>
+</head>
+	<body>
+<h2> Lab: Introduction to Loop Transformations</h2>
+<p>
+This lab aims to provide a bit of experience with loop transformations
+and give some feel of the challenges that the compiler writers encounter.
+You will apply a few loop transformations to a simple loop nest and experiment
+with various parameters associated with the transformations.
+</p>
+
+<h3>Setup</h3>
+<p>
+<tt>cd ~/EJCP-Lab/</tt>
+</p>
+<p>
+You should find a file named <tt class="code">syr2k.c</tt>. This is the starting point.
+The code performs a dense linear algebra computation called symmetric rank 2k update. 
+Essentially, it is some multiplications and additions of elements in two matrices (A,B), 
+strored into another matrix (C).
+</p>
+
+<p>
+This code contains the following functions:
+<ul>
+<li><tt>main</tt>: takes two inputs <tt>N M</tt> that define the size of the problem.</li>
+<li><tt>kernel_syr2k</tt>: which is the main loop nest to optimize</li>
+<li><tt>init_array</tt>: initializes array content</li>
+<li><tt>print_array</tt>: dumps the content of computed array</li>
+</ul>
+You should only touch main and the kernel during this lab.
+</p>
+
+<h3>Task Outline</h3>
+<ol>
+<li>Apply tiling with constant tile size.</li>
+<li>Apply tiling with parametric tile size.</li>
+<li>Try many different tile sizes and problem sizes to find "good" tile sizes.</li>
+<li>Apply loop permutation to take advantage of hardware prefetching.</li>
+<li>Compare performance of permuted version with tiled version.</li>
+<li>Parallelize the two versions using OpenMP pragmas.</li>
+<li>Try many different tile sizes for the parallelized tiled version.</li>
+<li>Compare performance of parallelized versions.</li>
+</ol>
+
+<h3>0. Setup Makefile</h3>
+<p>
+Create a <tt>Makefile</tt> to compile the <tt>syr2k.c</tt> 
+and make sure that it can be compiled and ran.
+</p>
+
+<p>
+The bare minimum would be:
+<pre>
+syr2k: syr2k.c
+	gcc -O3 -o $@ $<
+</pre>
+but note that you will be adding more files and possibly different options later on.
+</p>
+
+Try running with a small input size:<br/>
+<tt>./syr2k 100 100</tt>
+<p>
+It should dump the content of the <tt>C</tt> array to <tt><b>stderr</b></tt>,
+and the execution time to <tt><b>stdout</b></tt>
+</p>
+
+You can save the output to file by the following:<br/>
+<tt>./syr2k 100 100 2> out.orig.100x100</tt><br/>
+<p>
+which will come handy later on to verify that you didn't break the code.
+</p>
+
+
+
+<h3>1. Apply tiling with constant tile size</h3>
+<p>
+<ol>
+<li>Copy <tt>syr2k.c</tt> to a new file named <tt>syr2k-tiled.c</tt>.
+This will be the file to be modified in this step.</li>
+<li>Update the <tt>Makefile</tt> to compile <tt>syr2k-tiled</tt></li>
+<li>Tile the 3D loop nest in the kernel function. Let the tile size be 8.
+<ol type='a'>
+<li>
+You first want to create a 3D loop nest that will visit the original iteration
+space in a very sparse manner.  This is called the <tt>tile loop</tt>, which
+visits the lower-left corner of each tile (called <tt>tile origin</tt>).
+
+For example, if the original loop was the following:
+<pre>
+for (i=0; i&lt;N; i++)
+   for (j=0; j&lt;N; j++)
+		...
+</pre>
+The desired tile loop looks like this:
+<pre>
+for (ti=0; ti&lt;N; ti+=8)
+   for (tj=0; tj&lt;N; tj+=8)
+		...
+</pre>
+Note that I have changed the iterator names to <tt>tx</tt> to distinguish it from the original name.
+</li>Next, you will create another 3D loop nest that will visit all points in a tile, given a tile origin.
+This is called the <tt>point loop</tt>, which visits a much smaller space than the original loop nest.
+With the same example, the desired point loop looks like this:
+<pre>
+for (i=ti; i&lt;ti+8; i++)
+   for (j=tj; j&lt;tj+8; j++)
+		...
+</pre>
+The above visits an 8x8 region with (i,j) being the lower-left corner of the visited space.
+</li>
+<li>
+Now you can put the two loops together to get a tiled loop nest.
+<pre>
+for (ti=0; ti&lt;N; ti+=8)
+  for (tj=0; tj&lt;N; tj+=8)
+    for (i=ti; i&lt;ti+8; i++)
+      for (j=tj; j&lt;tj+8; j++)
+        ...
+</pre>
+The above loop nest should visit the same set of iteration points as the
+original loop, but in a different order. Apply the same sequence of
+transformations to the 3D loop nest in <tt>syr2k-tiled.c</tt>.
+</li>
+<li>
+However, there is a bug in the point loops in the above. Try to identify and
+fix the bug.
+<br/><br/>
+HINT: bug does not manifest when N is a multiple of 8.
+</li>
+<li>(Optional) As an additional thought exercise, think about applying tiling to more complex loop nests. What if the <tt>j</tt> loop used values of <tt>i</tt> like:
+<pre>
+for (i=0; i&lt;N; i++)
+   for (j=i; j&lt;N; j++)
+</li>
+</ol>
+</li>
+<li>Compile and test against the output of the original code. 
+(This step will not be explicitly stated from now on, but it should be done for any transformation.)</li>
+<li>Run with relatively large problem sizes 1000+ and compare performance.</li>
+</ol>
+
+<h3>2. Apply tiling with parametric tile size</h3>
+<ol>
+<li>Copy <tt>syr2k.c</tt> to a new file named <tt>syr2k-ptiled.c</tt>.
+This will be the file to be modified in this step.</li>
+<li>Update the <tt>Makefile</tt> to compile <tt>syr2k-ptiled</tt></li>
+<li>Apply the same transformations to the loop nest as the previous step, except that you make the tile sizes parametric.
+For this particular loop nest, you can simply replace all occurrences of 8 with some symbol. Use <tt>SI, SJ, SK</tt> as the tile size for each dimension.
+</li>
+<li>
+Modify the function signature of the kernel to accept the tile size parameters,
+and update the <tt>main</tt> to accept 3 additional parameters (<tt>SI, SJ,
+SK</tt>) using <tt>argc/argv</tt>. <br/> (If you are not familiar enough with C
+to do this step, ask your neighbors or the instructor.)
+</li>
+</ol>
+
+<h3>3. Try many different tile sizes and problem sizes to find "good" tile sizes</h3>
+<p>
+With the parameterized version, it is much easier to explore the effect of tile
+sizes. First check that running the parametric version with 8x8x8 tiles gives
+similar performance as the constant version. Then try different tiles, make
+sure to change the "shape" (i.e., use different size for each dimension), and
+also play with problem sizes.
+</p>
+
+A recommended strategy for exploration is as follows:
+<ol>
+<li>Select a problem size where N=M that takes more than 30 seconds with the
+original code (<tt>syr2k.c</tt>).
+</li>
+<li>Run the tiled version with the same problem size with various tile sizes.
+In this step, restrict to the case where <tt>SI=SJ=SK</tt>.
+Try different sizes from 2x2x2 to some large tile size that performs much
+poorly than smaller sizes.
+</li>
+<li>Plot the result and find where the optimal cubic tile size is.</li>
+<li>Explore non-cubic tiles (when </tt>!(SI=SJ=SK))</tt> to try and find a
+combination of sizes that is better.</li>
+</ol>
+Try the above for two other problem sizes, one each for cases when <tt>N&gt;M and N&lt;M</tt>.
+<p>
+(Optional) The thought exercise here is to think about why certain tile sizes
+perform better than others.  In our case, it is likely tied to the behavior of
+the Last Level Cache (or L1 Cache) of the processor.  Although it is a bit
+tricky through virtual machines, can you find some trend or a "rule of thumb"?
+</p>
+
+<h3>4. Apply loop permutation to take advantage of hardware prefetching</h3>
+<ol>
+<li>Copy <tt>syr2k.c</tt> to a new file named <tt>syr2k-perm.c</tt>.
+This will be the file to be modified in this step.</li>
+<li>Update the <tt>Makefile</tt> to compile <tt>syr2k-perm</tt></li>
+<li>Permute the 3D loop nest in the kernel function.
+Recall that the references are friendly to the HW prefetcher 
+if the innermost loop dimension of the loop do not traverse different rows of a matrix.
+</li>
+<li>See if you get performance improvement. For most machines today, it should, so it is likely a wrong permutation if it doesn't.
+</li>
+</ol>
+
+<h3>5. Compare performance of permuted version with tiled version</h3>
+<p>
+How do they compare? The expectation is that the tiled version is slightly worse.
+</p>
+
+<h3>6. Parallelize the two versions using OpenMP pragmas</h3>
+<p>
+For this lab, how the parallelization works and details of the OpenMP is outside its scope.
+The two versions (ptiled/perm) are extremely easy to parallelize, and does not even require tiling to parallelize.
+However, different transformations still impact parallel performance. Apply the following changes to parallelize your code.
+</p>
+
+<ol>
+<li>Copy <tt>syr2k-ptiled.c</tt> to a new file named <tt>syr2k-ptiled-omp.c</tt>.
+<li>Add the following line to the line just above the outermost loop in the kernel function. 
+<pre>
+#pragma omp parallel for private(ti,tj,tk,i,j,k)
+</pre>
+(You may need to adjust the loop iterator names to match your code.)
+<li>Copy <tt>syr2k-perm.c</tt> to a new file named <tt>syr2k-perm-omp.c</tt>.
+<li>Add the following line to the line just above the outermost loop in the kernel function. 
+<pre>
+#pragma omp parallel for private(i,j,k)
+</pre>
+(You may need to adjust the loop iterator names to match your code.)
+</li>
+<li>
+You also need to compile with two additional options:
+<pre>
+	gcc -O3 -o $@ $< -fopenmp -lgomp
+</pre>
+</li>
+<li>
+Now both of your code should use 2 cores when you execute them. (Because the VM is configured to only have 2 cores.)
+</li>
+</ol>
+
+<h3>7. Try many different tile sizes for the parallelized tiled version</h3>
+<p>
+Repeat what you did in Step 3 with the parallel versions using 2 cores.
+</p>
+
+<h3>8. Compare performance of parallelized versions</h3>
+<p>
+What did you observe? 
+</p>
+
+<h3>Extra Exercises</h3>
+<p>
+If you are done and are hungry for more exercises, there are two additional
+code in <tt>extra</tt> directory.
+<ul> 
+<li><tt>trmm</tt>: triangular matrix multiply. Tricky parts are the
+triangular iteration domain, and dependences due to reusing arrays for inputs
+and outputs.</li>
+<li><tt>mvt</tt>: two matrix vector products, where one is transposed. Tricky part is that you need to fuse the two loop nests to tile the entire computation.
+</ul>
+</p>
+
+
+
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+<br/>
+	</body>
+</html>
